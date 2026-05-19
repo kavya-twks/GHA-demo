@@ -3,6 +3,10 @@ import glob
 import subprocess
 import re
 import anthropic
+from pathlib import Path
+from git_manager import GitManager
+from typing import List, Dict, Optional
+import logging
 
 # 1. Initialize the Anthropic client
 api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -15,6 +19,13 @@ client = anthropic.Anthropic(api_key=api_key)
 # 2. Fetch target exceptions from the environment
 exceptions_env = os.environ.get("TARGET_EXCEPTIONS", "java.lang.NullPointerException")
 TARGET_EXCEPTIONS = [ex.strip() for ex in exceptions_env.split(",")]
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 def get_coding_standards(file_path=".github/scripts/coding-standards.md"):
     """Reads the coding standards from an external markdown file."""
@@ -90,53 +101,126 @@ def generate_fix(file_path, stack_trace, exc_type, coding_standards):
     fixed_code = message.content[0].text.replace('```java', '').replace('```', '').strip()
     return fixed_code
 
-# def create_pull_request(file_path, exc_type):
-#     """Creates a git branch, commits the fix, and raises a PR."""
-#     short_exc_name = exc_type.split('.')[-1]
-#     branch_name = f"ai-fix-{short_exc_name.lower()}"
-#
-#     subprocess.run(["git", "config", "--global", "user.name", "AI Self-Healer (Claude)"])
-#     subprocess.run(["git", "config", "--global", "user.email", "actions@github.com"])
-#
-#     subprocess.run(["git", "checkout", "-B", branch_name])
-#     subprocess.run(["git", "add", file_path])
-#     subprocess.run(["git", "commit", "-m", f"🤖 AI Auto-Fix: Resolved {short_exc_name}"])
-#     subprocess.run(["git", "push", "-f", "origin", branch_name])
-#
-#     os.environ["GH_TOKEN"] = os.environ.get("GITHUB_TOKEN")
-#     subprocess.run([
-#         "gh", "pr", "create",
-#         "--title", f"🤖 AI Auto-Fix: {short_exc_name}",
-#         "--body", f"This PR was generated automatically by Claude to fix a `{exc_type}` detected during the CI pipeline.\n\n**Note:** Claude was instructed to follow the rules defined in `coding-standards.md`.",
-#         "--base", "master",
-#         "--head", branch_name
-#     ])
-#     print("Pull Request created successfully!")
+def create_pr_and_commit(
+    git_manager: GitManager,
+    fixes_applied: List[Dict]
+) -> Optional[str]:
+    """
+    Create feature branch, commit fixes, push branch,
+    and open GitHub Pull Request.
+    """
+
+    try:
+        if not fixes_applied:
+            logger.warning("No fixes supplied.")
+            return None
+
+        # Create branch
+        branch_name = git_manager.create_branch()
+
+        logger.info(f"Created branch: {branch_name}")
+
+        # Extract files
+        fixed_files = [
+            fix["file"]
+            for fix in fixes_applied
+            if "file" in fix
+        ]
+
+        if not fixed_files:
+            logger.warning("No valid files to commit.")
+            return None
+
+        # Commit changes
+        commit_success = git_manager.commit_changes(
+            files=fixed_files
+        )
+
+        if not commit_success:
+            logger.warning("Commit failed.")
+            return None
+
+        logger.info(
+            f"Committed {len(fixed_files)} file(s)"
+        )
+
+        # Push branch
+        git_manager.push_branch(branch_name)
+
+        logger.info(
+            f"Pushed branch: {branch_name}"
+        )
+
+        # Create PR
+        pr_url = git_manager.create_pr(
+            branch_name=branch_name,
+            files_changed=fixed_files
+        )
+
+        logger.info(f"Created PR: {pr_url}")
+
+        return pr_url
+
+    except Exception as e:
+        logger.error(
+            f"PR creation workflow failed: {str(e)}"
+        )
+
+        return None      
 
 if __name__ == "__main__":
-    print(f"Starting Self-Healing Analysis looking for: {TARGET_EXCEPTIONS}")
 
-    # Read the standards first
-    standards = get_coding_standards(".github/scripts/coding-standards.md")
+    workspace = Path(os.getcwd())
+
+    git_manager = GitManager(workspace)
+
+    fixes_applied = []
+
+    standards = get_coding_standards(
+        ".github/scripts/coding-standards.md"
+    )
 
     stack_trace, exc_type = find_exception_in_reports()
 
     if stack_trace and exc_type:
-        print(f"{exc_type} detected. Locating faulty file...")
-        file_path = extract_failing_file_path(stack_trace)
+
+        file_path = extract_failing_file_path(
+            stack_trace
+        )
 
         if file_path:
-            print(f"Found faulty file: {file_path}. Generating fix...")
-            # Pass the standards to the AI generator
-            fixed_code = generate_fix(file_path, stack_trace, exc_type, standards)
 
-            print("Writing fix to file...", fixed_code)
-            # with open(file_path, 'w') as file:
-            #     file.write(fixed_code)
-            #
-            # print("Creating Pull Request...")
-            # create_pull_request(file_path, exc_type)
-        else:
-            print("Could not map stack trace to a local file.")
-    else:
-        print("No target exceptions detected in test reports.")
+            fixed_code = generate_fix(
+                file_path,
+                stack_trace,
+                exc_type,
+                standards
+            )
+
+            # Write fix
+            with open(file_path, "w") as file:
+                file.write(fixed_code)
+
+            # Validate
+            test_result = subprocess.run(
+                ["mvn", "test"],
+                capture_output=True,
+                text=True
+            )
+
+            if test_result.returncode == 0:
+
+                fixes_applied.append({
+                    "file": file_path,
+                    "exception": exc_type
+                })
+
+                pr_url = create_pr_and_commit(
+                    git_manager,
+                    fixes_applied
+                )
+
+                if pr_url:
+                    print(f"PR Created: {pr_url}")
+                else:
+                    print("Failed to create PR.")
