@@ -2,9 +2,9 @@ name: Spring Boot Build and Test
 
 on:
   push:
-    branches: '**' 
+    branches: ["feature-PR-gen"]
   pull_request:
-    branches: '**'
+    branches: ["feature-PR-gen"]
   workflow_dispatch:  # Allow manual trigger for testing
 
 # Grants the GITHUB_TOKEN permission to push branches and create PRs
@@ -67,3 +67,33 @@ jobs:
         if: always()
         run: |
           echo "Done with test. Result: ${{ job.status }}"
+
+  # ============================================
+  # Optional: Validation Job for Generated PRs
+  # ============================================
+  validate-ai-fix:
+    needs: build
+    if: failure()  # Only run if main build failed
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Check for AI-Generated PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Checking for AI-generated PRs ==="
+          
+          # List recent PRs with AI label
+          gh pr list \
+            --search "label:🤖-ai-generated" \
+            --state open \
+            --limit 5 \
+            --json number,title,createdAt
+
+      - name: Run Quality Checks on AI Fixes
+        run: |
+          echo "Future: Implement automated review of AI-generated code"
+          echo "- Run linters on changed files"
+          echo "- Check test coverage"
+          echo "- Verify compilation"
