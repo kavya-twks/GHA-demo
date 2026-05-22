@@ -1,9 +1,11 @@
 package com.tw.github_action_demo;
 
+import java.util.Optional;
+
 public class NPETestServiceImpl {
 
     public void testNPE() {
-        Integer p = null;
-        System.out.println(p.compareTo(10));
+        final Integer p = null;
+        Optional.ofNullable(p).ifPresent(value -> System.out.println(value.compareTo(10)));
     }
 }
